@@ -4,7 +4,16 @@ Entry point for launching Ruby.
 """
 import sys
 import argparse
+import signal
 from pathlib import Path
+
+# Suppress Playwright EPIPE errors on clean exit
+try:
+    def _handle_pipe(sig, frame):
+        pass
+    signal.signal(signal.SIGPIPE, _handle_pipe)
+except (OSError, AttributeError):
+    pass  # SIGPIPE not available on Windows
 
 # Ensure ruby package is in sys.path
 BASE_DIR = Path(__file__).resolve().parent

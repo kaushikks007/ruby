@@ -73,65 +73,81 @@ class RubyVoiceAssistant:
             except Exception:
                 pass
 
+    def _cleanup(self):
+        """Close browser and avatar to avoid EPIPE errors on exit."""
+        try:
+            from ruby.tools.browser_tools import get_browser_manager
+            bm = get_browser_manager()
+            if bm.context:
+                bm.context.close()
+            if bm.playwright:
+                bm.playwright.stop()
+        except Exception:
+            pass
+
     def start(self):
         self.is_running = True
         user_name = self.memory_mgr.load_profile().get("user", {}).get("name", "kaushik")
         voice_info = self.tts.get_current_voice_key()
-        
+
         console.print(Panel(
             f"[bold magenta]Ruby Voice Assistant Active[/bold magenta]\n"
-            f"[bold white]Wake word:[/bold white] [bold cyan]\"Hey Ruby\"[/bold cyan]\n"
             f"[bold white]Active Voice:[/bold white] [bold green]{voice_info}[/bold green]\n"
             f"[bold white]Owner:[/bold white] [bold yellow]{user_name}[/bold yellow]\n\n"
-            f"[dim]Say 'Hey Ruby' to wake her up, or press Ctrl+C to return to terminal.[/dim]",
+            f"[dim]Say 'Hey Ruby' once to start. Say 'bye ruby' to exit.[/dim]",
             title="[magenta]Voice Loop[/magenta]",
             border_style="magenta"
         ))
 
+        # ── STEP 1: Wait for wake word (once) ──────────────────────────
+        console.print("\n[dim]👂 Listening for 'Hey Ruby'...[/dim]")
+        wake_triggered = self.wake_detector.listen_for_wake_word(
+            stop_check=lambda: not self.is_running
+        )
+        if not wake_triggered:
+            return
+
+        console.print("\n[bold magenta]⚡ 'Hey Ruby' detected![/bold magenta]")
+        self._avatar_state("speaking")
+        self.tts.speak("Hey Kaushik! I'm all yours.", blocking=True)
+
+        # ── STEP 2: Face check (once) ──────────────────────────────────
+        if self.confirm_face:
+            console.print("[bold cyan]📷 Checking it's you...[/bold cyan]")
+            verdict = self.face_guard.confirm_user(required_frames=4, timeout_seconds=10)
+            if not verdict["matched"]:
+                console.print("[bold yellow]Face not recognized. Goodbye.[/bold yellow]")
+                self.tts.speak("That doesn't look like you. I'm heading back to sleep.", blocking=True)
+                return
+
+        # ── STEP 3: Continuous conversation loop ────────────────────────
+        console.print(f"\n[bold green]✓ Voice mode active. Say 'bye ruby' to exit.[/bold green]\n")
+
         while self.is_running:
             try:
-                console.print("\n[dim]👂 Listening for 'Hey Ruby'...[/dim]")
-                
-                # Listen for wake word
-                wake_triggered = self.wake_detector.listen_for_wake_word(
-                    stop_check=lambda: not self.is_running
-                )
-
-                if not wake_triggered:
-                    continue
-
-                console.print("\n[bold magenta]⚡ 'Hey Ruby' detected![/bold magenta]")
-                # Short spoken or tone acknowledgment
-                self._avatar_state("speaking")
-                self.tts.speak("I'm listening", blocking=True)
-
-                # Phase 5: confirm it's really the owner before acting on any command.
-                if self.confirm_face:
-                    console.print("[bold cyan]📷 Checking it's you...[/bold cyan]")
-                    verdict = self.face_guard.confirm_user(required_frames=4, timeout_seconds=10)
-                    if not verdict["matched"]:
-                        console.print("[bold yellow]Face not recognized - skipping command.[/bold yellow]")
-                        self._avatar_state("speaking")
-                        if verdict.get("frames", 0) == 0 and not verdict.get("label"):
-                            self.tts.speak("I didn't recognize you. Let me keep listening for 'Hey Ruby'.")
-                        else:
-                            self.tts.speak("That doesn't look like you. I'll hold off on that.")
-                        self._avatar_state("idle")
-                        continue
-
                 self._avatar_state("listening")
-                console.print("[bold cyan]🎤 Listening for your command...[/bold cyan]")
+                console.print("[bold cyan]🎤 Listening...[/bold cyan]")
                 _, user_speech = self.stt.record_until_silence(
                     silence_duration=1.5,
                     max_duration=25.0
                 )
 
                 if not user_speech:
-                    console.print("[dim]Didn't catch that. Returning to standby.[/dim]")
-                    self._avatar_state("idle")
+                    console.print("[dim]Didn't catch that. Still listening...[/dim]")
                     continue
 
                 console.print(f"[bold cyan]{user_name}:[/bold cyan] {user_speech}")
+
+                # Check for exit phrases
+                exit_phrases = ["bye ruby", "bye", "goodbye", "see you", "exit", "quit", "shut down", "sleep"]
+                if any(phrase in user_speech.lower() for phrase in exit_phrases):
+                    farewell = f"See you later, {user_name}! Take care."
+                    console.print(f"[bold magenta]Ruby:[/bold magenta] {farewell}")
+                    self._avatar_state("speaking")
+                    self.tts.speak(farewell, blocking=True)
+                    self._avatar_state("idle")
+                    self._cleanup()
+                    break
 
                 def on_tool(name, args):
                     if name == "web_search":
@@ -141,7 +157,7 @@ class RubyVoiceAssistant:
                 response = self.brain.chat(user_speech, on_tool_call=on_tool, voice_mode=True)
                 console.print(f"[bold magenta]Ruby:[/bold magenta] {response}\n")
 
-                # Speak response (avatar shows "speaking" while talking)
+                # Speak response
                 self._avatar_state("speaking")
                 self.tts.speak(response, blocking=True)
                 self._avatar_state("idle")
