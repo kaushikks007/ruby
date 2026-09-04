@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables (contains API keys!)
+.env
+
+# Browser data (large, session-specific)
+browser_data/
+
+# Node modules (avatar)
+ruby/avatar/node_modules/
+ruby/avatar/package-lock.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Pytest
+.pytest_cache/
+
+# Memory data (personal, user-specific)
+memory/face_embeddings/
+memory/voice_embeddings/
+
+# Temporary files
+*.tmp
+*.log
+*.bak

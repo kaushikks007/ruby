@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ruby</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:transparent; }
+  body { width:100vw; height:100vh; }
+  canvas { display:block; background:transparent; }
+  #hint {
+    position:fixed; bottom:6px; left:0; right:0; text-align:center;
+    font: 11px/1.4 system-ui, sans-serif; color:rgba(255,255,255,.45);
+    pointer-events:none; user-select:none;
+  }
+  /* thin invisible grab-strip: drag the overlay window by its top edge */
+  .dragbar { position:fixed; top:0; left:0; right:0; height:26px;
+             -webkit-app-region: drag; z-index:20; }
+</style>
+</head>
+<body>
+<div class="dragbar"></div>
+<div id="hint">Ruby — drag spider to orbit · scroll to zoom · grab top edge to move</div>
+<script src="three.min.js"></script>
+<script>
+/* ------------------------------------------------------------------
+   Ruby's spider avatar. Idle motion loop + reacts to listening/speaking.
+   State is driven externally: setAvatarState("idle"|"listening"|"speaking")
+   ------------------------------------------------------------------ */
+(function(){
+  if (typeof THREE === "undefined") {
+    // CDN fallback if the local three.min.js didn't load
+    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');
+    return;
+  }
+
+  const container = document.querySelector("body");
+  const scene = new THREE.Scene();
+
+  // Ortho-free perspective camera looking at the spider.
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera.position.set(0, 2.2, 7);
+  camera.lookAt(0, 1.2, 0);
+
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  container.appendChild(renderer.domElement);
+
+  // ---- lights (cool key + blue rim to pop the red suit) ----
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const key = new THREE.DirectionalLight(0xdfe6ff, 1.15);
+  key.position.set(3, 6, 4);
+  scene.add(key);
+  const rim = new THREE.PointLight(0x3355ff, 0.7, 20);
+  rim.position.set(-3, 2, -3);
+  scene.add(rim);
+
+  // ---- materials (Spider-Man movie-style: glossy red suit, deep-blue legs) ----
+  const red = new THREE.MeshStandardMaterial({ color: 0xd7263d, roughness: 0.25, metalness: 0.55 });
+  const redShade = new THREE.MeshStandardMaterial({ color: 0x8f1526, roughness: 0.4, metalness: 0.5 });
+  const blue = new THREE.MeshStandardMaterial({ color: 0x1f3fa8, roughness: 0.3, metalness: 0.5 });
+  const blueDark = new THREE.MeshStandardMaterial({ color: 0x12266b, roughness: 0.45, metalness: 0.45 });
+  const black = new THREE.MeshStandardMaterial({ color: 0x111318, roughness: 0.5, metalness: 0.25 });
+  const white = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.15, metalness: 0.0,
+    emissive: 0x223344, emissiveIntensity: 0.35
+  });
+  const coreMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, emissive: 0xff3d3d, emissiveIntensity: 0.7
+  });
+
+  function bodyMesh(geo, mat) { const m = new THREE.Mesh(geo, mat); return m; }
+
+  // ---- spider group ----  (red carapace + blue legs, emblem-style)
+  const spider = new THREE.Group();
+
+  // abdomen: glossy red "suit" with a black spider-emblem mark on top
+  const abdomen = bodyMesh(new THREE.SphereGeometry(0.7, 24, 18), red);
+  abdomen.scale.set(1.0, 0.88, 1.25);
+  abdomen.position.set(0, 1.0, 0.15);
+  spider.add(abdomen);
+
+  // emblem: dark plate on the abdomen that reads like the movie symbol
+  const emblem = bodyMesh(new THREE.CylinderGeometry(0.34, 0.46, 0.05, 5), black);
+  emblem.rotation.x = -0.5;
+  emblem.rotation.z = Math.PI / 5;
+  emblem.position.set(0, 1.0 + 0.45, 0.15);
+  spider.add(emblem);
+  // a crisp red "spider" slash across the emblem
+  const slash = bodyMesh(new THREE.BoxGeometry(0.5, 0.06, 0.06), red);
+  slash.rotation.z = Math.PI / 5;
+  slash.rotation.x = Math.PI / 2 + 0.3;
+  slash.position.set(0, 1.0 + 0.45, 0.2);
+  spider.add(slash);
+
+  // thorax: red teardrop
+  const thorax = bodyMesh(new THREE.SphereGeometry(0.45, 20, 16), redShade);
+  thorax.scale.set(1.0, 1.05, 1.3);
+  thorax.position.set(0, 1.35, -0.75);
+  spider.add(thorax);
+
+  // head / face node: black mask + big white Spider-Man eyes
+  const head = new THREE.Group();
+  head.position.set(0, 1.46, -1.02);
+  const face = bodyMesh(new THREE.SphereGeometry(0.28, 20, 16), black);
+  head.add(face);
+  // glowing core (heart) behind the mask
+  const core = bodyMesh(new THREE.SphereGeometry(0.12, 16, 12), coreMat);
+  core.position.set(0, 0.02, 0.18);
+  head.add(core);
+  // oversized white domed eyes (Signature Spider-Man look)
+  const eyeGeo = new THREE.SphereGeometry(0.09, 16, 14);
+  [-0.1, 0.1].forEach(ox => {
+    const e = bodyMesh(eyeGeo, white);
+    e.scale.set(1.0, 0.78, 0.55);
+    e.position.set(ox, 0.06, 0.2);
+    head.add(e);
+  });
+  spider.add(head);
+
+  // ---- legs: 4 per side, angular blue emblem-style with black joints ----
+  const legs = [];
+  const hipSpecs = [
+    { sx: -1, z: 0.55, angle: 0.55, upper: [0.09,0.09,0.78], lower: [0.07,0.07,0.62] },
+    { sx: -1, z: 0.15, angle: 0.35, upper: [0.09,0.09,0.84],  lower: [0.07,0.07,0.68] },
+    { sx: -1, z: -0.25, angle: -0.35,upper: [0.09,0.09,0.84], lower: [0.07,0.07,0.68] },
+    { sx: -1, z: -0.6, angle: -0.55,upper: [0.08,0.08,0.75], lower: [0.06,0.06,0.58] },
+  ];
+  function makeLeg(side, spec) {
+    const group = new THREE.Group();          // hip pivot
+    group.position.set(0.24, 1.15, spec.z);
+    group.rotation.y = spec.angle * side;
+    group.rotation.x = -0.12;                 // splay legs outward for the emblem shape
+    // blue upper thigh
+    const upper = bodyMesh(new THREE.CylinderGeometry(...spec.upper, 8), side === 1 ? blue : blueDark);
+    upper.rotation.x = 0.55;
+    upper.position.y = -0.38;
+    group.add(upper);
+    // black knee joint
+    const knee = bodyMesh(new THREE.SphereGeometry(spec.upper[0] + 0.01, 8, 8), black);
+    knee.position.y = -0.72;
+    upper.add(knee);
+    // blue-blue lower leg
+    const lower = bodyMesh(new THREE.CylinderGeometry(...spec.lower, 8), side === 1 ? blueDark : blue);
+    lower.rotation.x = -0.95;
+    lower.position.y = -0.75;
+    upper.add(lower);
+    group.userData = { baseRotY: group.rotation.y, side, upper, lower };
+    spider.add(group);
+    legs.push(group);
+  }
+  hipSpecs.forEach(sp => { makeLeg(1, sp); makeLeg(-1, sp); });
+
+  spider.position.y = 0.6;
+  scene.add(spider);
+
+  // ---- state + animation ----
+  const STATE = { idle: 0, listening: 1, speaking: 2 };
+  let state = STATE.idle;
+  let targetState = STATE.idle;
+
+  // Smoothly ease targetState so transitions aren't jarring.
+  function setAvatarState(name) {
+    if (name in STATE) targetState = STATE[name];
+  }
+  window.setAvatarState = setAvatarState;
+
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const t = clock.getElapsedTime();
+    // ease current state toward target so spikes don't snap
+    state += (targetState - state) * 0.05;
+
+    // breathing (always)
+    const breathe = 1 + Math.sin(t * 2.0) * 0.025 * (0.6 + state * 0.4);
+    abdomen.scale.set(1.0 * breathe, 0.88 * breathe, 1.25);
+    // core pulses stronger when speaking
+    const pulse = 1 + (Math.sin(t * 8) * 0.4 + 0.6) * (state === STATE.speaking ? 1 : 0.25);
+    core.scale.set(pulse, pulse, pulse);
+    coreMat.emissiveIntensity = 0.3 + pulse * (0.3 + state * 0.3);
+
+    // idle bob (whole body)
+    spider.position.y = 0.6 + Math.sin(t * 1.6) * 0.03;
+    // listening: perked, subtle side sway; speaking: animated rock to the (fake) cadence
+    const rock = state === STATE.speaking ? Math.sin(t * 7) * 0.06 : 0;
+    const sway = state === STATE.listening ? Math.sin(t * 3) * 0.02 : 0;
+    spider.rotation.z = rock + sway;
+    head.rotation.y = state === STATE.listening ? Math.sin(t * 4) * 0.12 : 0;
+
+    // legs: idle twitch, lively when listening
+    const legPhase = state === STATE.listening ? t * 2.5 : t * 0.8;
+    const amp = 0.05 + state * 0.05;
+    legs.forEach((g, i) => {
+      const off = g.userData.side === 1 ? 0 : Math.PI;
+      const wiggle = Math.sin(legPhase + i * 0.9 + off) * amp;
+      g.rotation.y = g.userData.baseRotY + wiggle;
+      g.userData.upper.rotation.x = 0.55 + Math.sin(legPhase + i * 0.7) * (0.04 + state * 0.03);
+    });
+
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ---- drag to orbit, scroll to zoom ----
+  let dragging = false, px = 0, py = 0, theta = 0, phi = 0, dist = 7;
+  const dragTarget = renderer.domElement;
+  dragTarget.addEventListener("pointerdown", e => {
+    dragging = true; px = e.clientX; py = e.clientY;
+  });
+  window.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    theta -= (e.clientX - px) * 0.005; phi -= (e.clientY - py) * 0.005;
+    phi = Math.max(-0.4, Math.min(1.2, phi));
+    px = e.clientX; py = e.clientY;
+  });
+  window.addEventListener("pointerup", () => dragging = false);
+  window.addEventListener("wheel", e => {
+    dist = Math.max(4, Math.min(14, dist + e.deltaY * 0.01));
+  });
+  function orbit() {
+    requestAnimationFrame(orbit);
+    camera.position.x = dist * Math.sin(theta) * Math.cos(phi);
+    camera.position.y = 2.2 + dist * Math.sin(phi);
+    camera.position.z = dist * Math.cos(theta) * Math.cos(phi);
+    camera.lookAt(0, 1.2, 0);
+  }
+  orbit();
+
+  // ---- poll the Ruby state endpoint (set by the Python side) ----
+  // Poll localhost on a fixed port; TURNED_OFF if not running.
+  const POLL = 400;
+  setInterval(() => {
+    fetch("http://127.0.0.1:47652/state", { cache: "no-store" })
+      .then(r => r.json())
+      .then(j => { if (j && j.state) setAvatarState(j.state); })
+      .catch(() => { /* python side not running: stay idle */ });
+  }, POLL);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+anthropic>=0.40.0
+psutil>=5.9.0
+ddgs>=9.16.0
+duckduckgo_search>=7.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+rich>=13.7.0
+pytest>=8.0.0
+pip-system-certs>=5.0
+
+# Voice Subsystem Dependencies (Phase 2)
+faster-whisper>=1.0.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+pyttsx3>=2.90
+edge-tts>=6.1.0
+openwakeword>=0.6.0
+pygame>=2.5.0
+
+# Browser Automation & Body Dependencies (Phase 3)
+playwright>=1.40.0
+
+# Face Recognition (Phase 5) - local-only, no cloud
+opencv-contrib-python>=4.8
+
+# 3D Avatar (Phase 6) - Python side is stdlib-only; the Three.js/Electron
+# overlay lives in ruby/avatar/ and is installed separately via npm (see README).

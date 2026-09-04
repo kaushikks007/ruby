@@ -1,0 +1,15 @@
+{
+  "name": "ruby-avatar",
+  "version": "0.1.0",
+  "description": "Ruby's 3D spider avatar overlay (always-on-top, transparent).",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  },
+  "dependencies": {
+    "three": "0.128.0"
+  }
+}
