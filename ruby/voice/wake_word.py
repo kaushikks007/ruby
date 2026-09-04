@@ -82,74 +82,107 @@ class WakeWordDetector:
         if sd is None:
             raise ImportError("sounddevice is not installed.")
 
-        device_idx, channels, actual_rate = get_cached_device(sample_rate)
-        if device_idx is None:
-            print("[WakeWordDetector] No microphone found.")
-            return False
-        if actual_rate != sample_rate:
-            print(f"[WakeWordDetector] Using device {device_idx} at native rate "
-                  f"{actual_rate}Hz (requested {sample_rate}Hz).")
-        chunk_size = int(actual_rate * 0.08)  # 80ms chunk (openwakeword standard)
-        min_speech_chunks = max(4, int(0.5 / 0.08))   # ~0.5s before we treat it as a phrase
-        safety_chunks = int(max_speech_seconds / 0.08)
-        window_chunks = int(1.6 / 0.08)               # trailing window for the ramble safety net
-        speech_buffer = []
-        silence_start = None
-        last_heartbeat = time.time()
-        # Adaptive noise floor. We refine a rolling estimate from genuinely quiet
-        # frames so persistent ambient/media noise can't flood the detector and
-        # make it "hear speech" constantly. Speech is judged against a multiple of
-        # this floor (bounded below by energy_threshold).
-        noise_est = float(energy_threshold)
-        NOISE_MARGIN = 2.5
-
-        with sd.InputStream(samplerate=actual_rate, channels=channels,
-                            device=device_idx, dtype='int16') as stream:
-            while True:
-                if stop_check and stop_check():
+        # Outer retry loop: if the mic is silent (WASAPI intermittently returns
+        # digital silence), recover by re-probing a fresh device and restart.
+        recovery_attempts = 0
+        while recovery_attempts < 5:
+            device_idx, channels, actual_rate = get_cached_device(sample_rate)
+            if device_idx is None:
+                print("[WakeWordDetector] No microphone found.")
+                if recovery_attempts >= 4:
                     return False
-                chunk, _ = stream.read(chunk_size)
+                recovery_attempts += 1
+                time.sleep(1)
+                continue
+            if actual_rate != sample_rate:
+                print(f"[WakeWordDetector] Using device {device_idx} at native rate "
+                      f"{actual_rate}Hz (requested {sample_rate}Hz).")
+            chunk_size = int(actual_rate * 0.08)  # 80ms chunk (openwakeword standard)
+            min_speech_chunks = max(4, int(0.5 / 0.08))   # ~0.5s before we treat it as a phrase
+            safety_chunks = int(max_speech_seconds / 0.08)
+            window_chunks = int(1.6 / 0.08)               # trailing window for the ramble safety net
+            speech_buffer = []
+            silence_start = None
+            last_heartbeat = time.time()
+            # Adaptive noise floor. We refine a rolling estimate from genuinely quiet
+            # frames so persistent ambient/media noise can't flood the detector and
+            # make it "hear speech" constantly. Speech is judged against a multiple of
+            # this floor (bounded below by energy_threshold).
+            noise_est = float(energy_threshold)
+            NOISE_MARGIN = 2.5
 
-                # Downmix to mono, averaging channels (protects against array mics).
-                audio_np = to_mono(chunk).astype(np.int16)
+            listen_start = time.time()
+            ever_heard_audio = False
 
-                # Check with openwakeword if loaded (fast path; usually unavailable here).
-                if self.oww_model is not None:
-                    self.oww_model.predict(audio_np)
-                    for model_name, scores in self.oww_model.prediction_buffer.items():
-                        if scores and scores[-1] > self.sensitivity:
-                            return True
+            try:
+                with sd.InputStream(samplerate=actual_rate, channels=channels,
+                                    device=device_idx, dtype='int16') as stream:
+                    while True:
+                        if stop_check and stop_check():
+                            return False
+                        chunk, _ = stream.read(chunk_size)
 
-                audio_float = audio_np.astype(np.float32) / 32768.0
-                rms = np.sqrt(np.mean(audio_float ** 2))
-                threshold = max(energy_threshold, noise_est * NOISE_MARGIN)
+                        # Downmix to mono, averaging channels (protects against array mics).
+                        audio_np = to_mono(chunk).astype(np.int16)
 
-                if rms > threshold:
-                    speech_buffer.append(audio_float)
-                    silence_start = None
-                    # Safety net: continuous talking (no natural pause) — check the
-                    # trailing window periodically, then reset for a fresh shot.
-                    if len(speech_buffer) >= safety_chunks:
-                        if self._is_wake_phrase(
-                                np.concatenate(speech_buffer[-window_chunks:]), actual_rate):
-                            return True
-                        speech_buffer = []
-                        silence_start = None
-                else:
-                    # A genuinely quiet frame: gently track the noise floor.
-                    noise_est = 0.95 * noise_est + 0.05 * rms
-                    if speech_buffer:
-                        if silence_start is None:
-                            silence_start = time.time()
-                        elif time.time() - silence_start >= end_speech_silence:
-                            # Phrase finished. Transcribe once and decide.
-                            if len(speech_buffer) >= min_speech_chunks and \
-                                    self._is_wake_phrase(
-                                        np.concatenate(speech_buffer), actual_rate):
-                                return True
-                            speech_buffer = []
+                        # Check with openwakeword if loaded (fast path; usually unavailable here).
+                        if self.oww_model is not None:
+                            self.oww_model.predict(audio_np)
+                            for model_name, scores in self.oww_model.prediction_buffer.items():
+                                if scores and scores[-1] > self.sensitivity:
+                                    return True
+
+                        audio_float = audio_np.astype(np.float32) / 32768.0
+                        rms = np.sqrt(np.mean(audio_float ** 2))
+                        threshold = max(energy_threshold, noise_est * NOISE_MARGIN)
+
+                        if rms > threshold:
+                            ever_heard_audio = True
+                            speech_buffer.append(audio_float)
                             silence_start = None
+                            # Safety net: continuous talking (no natural pause) — check the
+                            # trailing window periodically, then reset for a fresh shot.
+                            if len(speech_buffer) >= safety_chunks:
+                                if self._is_wake_phrase(
+                                        np.concatenate(speech_buffer[-window_chunks:]), actual_rate):
+                                    return True
+                                speech_buffer = []
+                                silence_start = None
+                        else:
+                            # A genuinely quiet frame: gently track the noise floor.
+                            noise_est = 0.95 * noise_est + 0.05 * rms
+                            if speech_buffer:
+                                if silence_start is None:
+                                    silence_start = time.time()
+                                elif time.time() - silence_start >= end_speech_silence:
+                                    # Phrase finished. Transcribe once and decide.
+                                    if len(speech_buffer) >= min_speech_chunks and \
+                                            self._is_wake_phrase(
+                                                np.concatenate(speech_buffer), actual_rate):
+                                        return True
+                                    speech_buffer = []
+                                    silence_start = None
 
-                if on_listening_heartbeat and (time.time() - last_heartbeat > 2.0):
-                    on_listening_heartbeat()
-                    last_heartbeat = time.time()
+                        # MIC HEALTH CHECK: if we've listened several seconds and
+                        # NEVER heard any real audio, the mic is silent/broken.
+                        # Reset the device cache and re-probe to recover.
+                        if not ever_heard_audio and (time.time() - listen_start > 4.0):
+                            print("[WakeWordDetector] Mic silent — re-probing device...")
+                            import ruby.voice.audio_input as _ai
+                            _ai._cached_device = None
+                            break
+
+                        if on_listening_heartbeat and (time.time() - last_heartbeat > 2.0):
+                            on_listening_heartbeat()
+                            last_heartbeat = time.time()
+
+                # Only reached if we `break` (mic recovery). Retry loop.
+                recovery_attempts += 1
+                continue
+            except Exception as e:
+                print(f"[WakeWordDetector] Mic stream error: {e} — re-probing...")
+                import ruby.voice.audio_input as _ai
+                _ai._cached_device = None
+                recovery_attempts += 1
+                time.sleep(1)
+                continue
