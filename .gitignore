@@ -38,9 +38,8 @@ desktop.ini
 # Pytest
 .pytest_cache/
 
-# Memory data (personal, user-specific)
-memory/face_embeddings/
-memory/voice_embeddings/
+# Memory data (personal, user-specific) — keep out of git entirely
+memory/
 
 # Temporary files
 *.tmp
