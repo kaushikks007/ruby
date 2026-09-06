@@ -14,6 +14,9 @@ env/
 # Environment variables (contains API keys!)
 .env
 
+# Notes dump that once contained an API key — never commit this
+details of ruby human readable.txt
+
 # Browser data (large, session-specific)
 browser_data/
 
