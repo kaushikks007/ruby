@@ -44,6 +44,7 @@ class WakeWordDetector:
     def _is_wake_phrase(self, audio: np.ndarray, sample_rate: int) -> bool:
         """True if the transcribed utterance contains the wake word."""
         text = self._transcribe(audio, sample_rate)
+        print(f"[WakeWordDetector] woke-check heard: {text!r}")
         if not text:
             return False
         # Direct match: 'hey ruby', 'ruby', 'hi ruby', etc.
@@ -98,7 +99,7 @@ class WakeWordDetector:
                 print(f"[WakeWordDetector] Using device {device_idx} at native rate "
                       f"{actual_rate}Hz (requested {sample_rate}Hz).")
             chunk_size = int(actual_rate * 0.08)  # 80ms chunk (openwakeword standard)
-            min_speech_chunks = max(4, int(0.5 / 0.08))   # ~0.5s before we treat it as a phrase
+            min_speech_chunks = 4   # ~0.32s — a compact "hey ruby" is often <0.5s of real speech
             safety_chunks = int(max_speech_seconds / 0.08)
             window_chunks = int(1.6 / 0.08)               # trailing window for the ramble safety net
             speech_buffer = []
@@ -156,18 +157,24 @@ class WakeWordDetector:
                                     silence_start = time.time()
                                 elif time.time() - silence_start >= end_speech_silence:
                                     # Phrase finished. Transcribe once and decide.
-                                    if len(speech_buffer) >= min_speech_chunks and \
-                                            self._is_wake_phrase(
-                                                np.concatenate(speech_buffer), actual_rate):
+                                    if len(speech_buffer) < min_speech_chunks:
+                                        print(f"[WakeWordDetector] Phrase too short, "
+                                              f"ignored ({len(speech_buffer)}/{min_speech_chunks} chunks)")
+                                    elif self._is_wake_phrase(
+                                            np.concatenate(speech_buffer), actual_rate):
                                         return True
+                                    else:
+                                        print("[WakeWordDetector] Heard speech but not the wake word")
                                     speech_buffer = []
                                     silence_start = None
 
-                        # MIC HEALTH CHECK: if we've listened several seconds and
-                        # NEVER heard any real audio, the mic is silent/broken.
-                        # Reset the device cache and re-probe to recover.
-                        if not ever_heard_audio and (time.time() - listen_start > 4.0):
-                            print("[WakeWordDetector] Mic silent — re-probing device...")
+                        # MIC HEALTH CHECK: only re-probe if we've been listening a LONG
+                        # while and NEVER heard any real audio. A healthy mic with a
+                        # user who just hasn't spoken yet is NOT a dead mic — bailing
+                        # after a few seconds of quiet was causing constant "Mic silent"
+                        # re-probes that swallowed the user's actual wake word.
+                        if not ever_heard_audio and (time.time() - listen_start > 15.0):
+                            print("[WakeWordDetector] No audio for 15s — re-probing device...")
                             import ruby.voice.audio_input as _ai
                             _ai._cached_device = None
                             break

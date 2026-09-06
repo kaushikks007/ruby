@@ -89,12 +89,12 @@ def run_cli(voice_mode: bool = False, face_confirm: bool = None):
     
     console.print(f"[accent]*[/accent] [bold white]Connected to Ruby Brain & OS Control.[/bold white] Welcome back, [bold cyan]{user_name}[/bold cyan]! (Voice: [green]{voice_key}[/green])")
     
-    if not brain.api_key:
+    if not brain.providers:
         console.print(
             Panel(
-                "[warning]Note:[/warning] `ANTHROPIC_API_KEY` is not set yet.\n"
-                "To enable full reasoning and live chat with Claude, create a `.env` file in `C:\\Users\\sudha\\OneDrive\\ruby\\.env`:\n"
-                "[bold cyan]ANTHROPIC_API_KEY=your_anthropic_api_key_here[/bold cyan]\n\n"
+                "[warning]Note:[/warning] No LLM provider is configured.\n"
+                "To enable reasoning and live chat, add at least one API key to `C:\\Users\\sudha\\OneDrive\\ruby\\.env`:\n"
+                "[bold cyan]ANTHROPIC_API_KEY=your_key_here[/bold cyan]  (or NVIDIA_API_KEY / OMNIROUTE_API_KEY)\n\n"
                 "Local memory, OS app launching, script runner, browser automation, and voice tools are fully functional in the meantime.",
                 title="API Key Configuration",
                 border_style="yellow"

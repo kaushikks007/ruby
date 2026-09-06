@@ -58,9 +58,22 @@ class WhisperSTT:
                 audio_data = signal.resample_poly(
                     audio_data, 16000, sample_rate
                 ).astype(np.float32)
-                sample_rate = 16000
             except Exception as e:
-                print(f"[WhisperSTT] resample skipped ({e}); using raw {sample_rate}Hz input")
+                # scipy unavailable — downsampling rate (mirrors resample_poly
+                # for integer ratios). This is critical: a 48kHz mic feeding raw
+                # audio into a 16kHz model garbles wake words into nonsense
+                # ("hey ruby" -> "i don't mean"). 48000->16000 is an exact 3:1
+                # decimation, which is a clean, dependency-free downsample.
+                print(f"[WhisperSTT] scipy resample unavailable ({e}); using numpy downsample")
+                factor = int(round(sample_rate / 16000.0))
+                if factor > 1 and abs(sample_rate / factor - 16000) < sample_rate * 0.02:
+                    audio_data = audio_data[::factor]
+                else:
+                    n = int(audio_data.size * 16000.0 / sample_rate)
+                    idx = np.linspace(0, audio_data.size - 1, n).astype(int)
+                    audio_data = audio_data[idx]
+                audio_data = np.ascontiguousarray(audio_data, dtype=np.float32)
+            sample_rate = 16000
         # Boost quiet microphone input. Whisper transcribes best on normalized
         # audio; very-low-level signals (array mics / low gain) return silence
         # or garbage otherwise. We only scale genuinely-quiet-but-audible audio,

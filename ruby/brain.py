@@ -7,6 +7,7 @@ from ruby.config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL,
     BASE_SYSTEM_PROMPT,
+    LLM_PROVIDERS,
     OPENROUTER_BASE_URL,
 )
 from ruby.memory_manager import MemoryManager
@@ -133,15 +134,52 @@ class RubyBrain:
             "execute_script": self._wrap_tool(execute_script),
         }
 
+        # --- Multi-provider LLM failover -------------------------------------
+        # Callers passing an explicit api_key/model (old interface) get a single
+        # "Override" provider; otherwise Ruby uses the ordered provider list from
+        # config.py and falls through to the next provider when one fails.
+        if api_key is not None or model is not None:
+            self.providers = [{
+                "name": "Override",
+                "api_key": self.api_key,
+                "base_url": OPENROUTER_BASE_URL,
+                "model": self.model,
+            }]
+        else:
+            self.providers = [dict(p) for p in LLM_PROVIDERS]
+        self._active_provider = None  # last known-working provider (same session)
+        self._clients = {}            # provider name -> OpenAI client (lazy)
+
+        # Backward-compat client on the first provider; chat() uses per-provider
+        # clients via _client_for(), this is only for any external reader.
         self.client = None
-        if OpenAI and self.api_key:
+        if OpenAI and self.providers:
             try:
-                self.client = OpenAI(
-                    api_key=self.api_key,
-                    base_url=OPENROUTER_BASE_URL,
-                )
+                self.client = self._client_for(self.providers[0])
             except Exception as e:
                 print(f"[RubyBrain] Warning: Could not initialize OpenAI client: {e}")
+
+    def _client_for(self, provider: dict):
+        """Lazily build (and cache) the OpenAI client for one provider."""
+        name = provider["name"]
+        if name not in self._clients:
+            self._clients[name] = OpenAI(
+                api_key=provider["api_key"],
+                base_url=provider["base_url"],
+            )
+        return self._clients[name]
+
+    def _api_error_message(self, e: Exception) -> str:
+        """Friendly, user-facing message for a provider/API failure."""
+        if isinstance(e, APIConnectionError):
+            return f"I had trouble connecting to the network to think through that: {e}. Want me to try again?"
+        if isinstance(e, RateLimitError):
+            return f"Hit the API rate limit for a second: {e}. Let's pause a moment and retry."
+        if isinstance(e, APIStatusError):
+            return f"API returned an error ({e.status_code}): {e}"
+        if isinstance(e, OpenAIError):
+            return f"API error: {e}"
+        return f"Something broke on my end while processing that: {e}"
 
     def _wrap_tool(self, func: Callable) -> Callable:
         import inspect
@@ -195,93 +233,124 @@ class RubyBrain:
         When voice_mode=True, a short instruction is appended to the system prompt
         so the model keeps spoken responses brief and conversational.
         """
-        if not self.api_key or not self.client:
-            # Helpful guidance if no API key is configured yet
+        if not self.providers:
+            # Helpful guidance if no API provider is configured yet
             return (
-                "Hey! I need my API key to start thinking. "
+                "Hey! I need an API key to start thinking. "
                 "Please add `ANTHROPIC_API_KEY=your_key_here` to your `.env` file in `C:\\Users\\sudha\\OneDrive\\ruby` "
                 "or set it in your environment variables, and I'll be ready to roll!"
             )
+        if OpenAI is None:
+            return "I need the `openai` package to think. How about a quick: pip install openai"
 
         # Append user message
         self.messages.append({"role": "user", "content": user_input})
 
         system_prompt = self.assemble_system_prompt(voice_mode=voice_mode)
         max_iterations = 10  # Safety limit for multi-step tool calls
+        history_base = len(self.messages)  # index right after the user message
 
-        try:
-            for _ in range(max_iterations):
-                request = {
-                    "model": self.model,
-                    "max_tokens": 4096,
-                    "messages": [{"role": "system", "content": system_prompt}] + self.messages,
-                }
-                if self.tool_definitions:
-                    request["tools"] = _to_openai_tools(self.tool_definitions)
+        # Provider order: the last known-working provider first (so a healthy
+        # session doesn't re-hit a dead provider on every message), then the rest
+        # in config priority order.
+        order = [dict(p) for p in self.providers]
+        if self._active_provider:
+            active = next((p for p in order if p["name"] == self._active_provider), None)
+            if active:
+                order = [active] + [p for p in order if p["name"] != self._active_provider]
 
-                try:
-                    response = self.client.chat.completions.create(**request)
-                except APIStatusError as e:
-                    if e.status_code == 400 and "tool" in str(e).lower():
-                        # Model hallucinated an invalid tool — retry without tools
-                        request.pop("tools", None)
-                        response = self.client.chat.completions.create(**request)
+        failures = []  # provider names that were tried and failed this turn
+        for provider in order:
+            try:
+                client = self._client_for(provider)
+
+                for _ in range(max_iterations):
+                    request = {
+                        "model": provider["model"],
+                        "max_tokens": 4096,
+                        "messages": [{"role": "system", "content": system_prompt}] + self.messages,
+                    }
+                    if self.tool_definitions:
+                        request["tools"] = _to_openai_tools(self.tool_definitions)
+
+                    try:
+                        response = client.chat.completions.create(**request)
+                    except APIStatusError as e:
+                        if e.status_code == 400 and "tool" in str(e).lower():
+                            # Model hallucinated an invalid tool — retry without tools
+                            request.pop("tools", None)
+                            response = client.chat.completions.create(**request)
+                        else:
+                            raise
+                    message = response.choices[0].message
+
+                    # Check for tool calls (OpenAI/OpenRouter format)
+                    tool_calls = getattr(message, "tool_calls", None)
+                    if tool_calls:
+                        # Keep the assistant message (with tool_calls) in history.
+                        assistant_entry = {"role": "assistant", "content": message.content, "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                            }
+                            for tc in tool_calls
+                        ]}
+                        self.messages.append(assistant_entry)
+
+                        tool_results = []
+                        for tc in tool_calls:
+                            tool_name = tc.function.name
+                            import json as _json
+                            try:
+                                tool_input = _json.loads(tc.function.arguments or "{}")
+                            except Exception:
+                                tool_input = {}
+                            tool_id = tc.id
+
+                            if on_tool_call:
+                                on_tool_call(tool_name, tool_input)
+
+                            result = self.execute_tool(tool_name, tool_input)
+                            tool_results.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": str(result)
+                            })
+
+                        self.messages.extend(tool_results)
+                        # Continue loop to let the model process tool outputs
+                        continue
                     else:
-                        raise
-                message = response.choices[0].message
+                        # Final assistant message reached
+                        final_text = message.content or ""
+                        self.messages.append({"role": "assistant", "content": final_text})
+                        self._active_provider = provider["name"]
+                        return final_text
 
-                # Check for tool calls (OpenAI/OpenRouter format)
-                tool_calls = getattr(message, "tool_calls", None)
-                if tool_calls:
-                    # Keep the assistant message (with tool_calls) in history.
-                    assistant_entry = {"role": "assistant", "content": message.content, "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                        }
-                        for tc in tool_calls
-                    ]}
-                    self.messages.append(assistant_entry)
+                # Exhausted the iteration budget: model nudged into a tool loop.
+                # That's not a provider outage, so don't fail over to another key.
+                return "I got caught in a tool loop while executing that action. Could you try again or rephrase?"
 
-                    tool_results = []
-                    for tc in tool_calls:
-                        tool_name = tc.function.name
-                        import json as _json
-                        try:
-                            tool_input = _json.loads(tc.function.arguments or "{}")
-                        except Exception:
-                            tool_input = {}
-                        tool_id = tc.id
+            except (APIConnectionError, RateLimitError, APIStatusError, OpenAIError) as e:
+                # Only fail over if no side-effecting tool has run this turn.
+                # If one already ran (e.g. a WhatsApp message or file write), a
+                # retry against another provider could re-execute it — instead
+                # surface the error and let the user decide.
+                if len(self.messages) != history_base:
+                    return self._api_error_message(e)
+                failures.append(provider["name"])
+                print(f"[RubyBrain] Provider {provider['name']} failed "
+                      f"({e.__class__.__name__}) → trying next")
+                # Reset history to just after the user message, so the next
+                # provider starts clean without the user message being added twice.
+                del self.messages[history_base:]
+            except Exception as e:
+                return self._api_error_message(e)
 
-                        if on_tool_call:
-                            on_tool_call(tool_name, tool_input)
-
-                        result = self.execute_tool(tool_name, tool_input)
-                        tool_results.append({
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "content": str(result)
-                        })
-
-                    self.messages.extend(tool_results)
-                    # Continue loop to let the model process tool outputs
-                    continue
-                else:
-                    # Final assistant message reached
-                    final_text = message.content or ""
-                    self.messages.append({"role": "assistant", "content": final_text})
-                    return final_text
-
-            return "I got caught in a tool loop while executing that action. Could you try again or rephrase?"
-
-        except APIConnectionError as e:
-            return f"I had trouble connecting to the network to think through that: {str(e)}. Want me to try again?"
-        except RateLimitError as e:
-            return f"Hit the API rate limit for a second: {str(e)}. Let's pause a moment and retry."
-        except APIStatusError as e:
-            return f"API returned an error ({e.status_code}): {e}"
-        except OpenAIError as e:
-            return f"API error: {e}"
-        except Exception as e:
-            return f"Something broke on my end while processing that: {str(e)}"
+        tried = ", ".join(failures) or "no providers configured"
+        return (
+            f"I tried all {len(order)} sources ({tried}) and every one failed. "
+            "Everything was tested — I'll reconnect when a source is back. "
+            "Ask me again in a bit."
+        )

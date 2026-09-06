@@ -36,6 +36,23 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "anthropic/claude-3.5-sonnet")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
+# Multi-provider LLM failover: Ruby tries providers in this order and falls
+# through if one fails (network, auth, rate limit, 5xx). Providers with an
+# empty api_key are skipped, so disabling one = empty its key in .env.
+# To add a 4th/5th provider: add a trio of env vars (X_API_KEY / X_BASE_URL /
+# X_MODEL) in .env and one entry in LLM_PROVIDERS below, in priority order.
+LLM_PROVIDERS = [
+    {"name": "Groq", "api_key": ANTHROPIC_API_KEY,
+     "base_url": OPENROUTER_BASE_URL, "model": ANTHROPIC_MODEL},
+    {"name": "NVIDIA", "api_key": os.getenv("NVIDIA_API_KEY", ""),
+     "base_url": os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+     "model": os.getenv("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct")},
+    {"name": "OmniRoute", "api_key": os.getenv("OMNIROUTE_API_KEY", ""),
+     "base_url": os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1"),
+     "model": os.getenv("OMNIROUTE_MODEL", "cfp/openai/gpt-oss-120b")},
+]
+LLM_PROVIDERS = [p for p in LLM_PROVIDERS if p["api_key"]]
+
 # Phase 5: gate voice commands on confirming the owner's face (local-only).
 FACE_CONFIRM_VOICE = os.getenv("RUBY_FACE_CONFIRM", "1").lower() not in ("0", "false", "no")
 # LBPH confidence = distance; LOWER is a closer match. Calibrated against kaushik's
